@@ -103,7 +103,21 @@
       :org
       "*"
       :markdown
-      "#"
+      "-"
+
+      "")))
+
+(defn repeat-block-pattern
+  [format n]
+  (let [pattern (get-block-pattern format)]
+    (case format
+      :org
+      (apply str (repeat n pattern))
+
+      :markdown
+      (if (<= n 1)
+        pattern
+        (str (apply str (repeat (* (dec n) 4) " ")) pattern))
 
       "")))
 
@@ -240,10 +254,9 @@
 
 (defn default-empty-block
   ([format]
-   (default-empty-block format 2))
+   (default-empty-block format 1))
   ([format n]
-   (let [block-pattern (get-block-pattern format)]
-     (apply str (repeat n block-pattern)))))
+   (repeat-block-pattern format n)))
 
 (defn with-code-wrapper
   [format mode code]

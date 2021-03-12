@@ -32,16 +32,16 @@
   (let [new-level (recompute-block-level to-block nested?)
         target-level (:block/level target-block)
         format (:block/format target-block)
-        pattern (config/get-block-pattern format)
         block-changes (atom [])
         all-content (block-handler/get-block-content-rec
                      target-block
                      (fn [{:block/keys [uuid level content]
                            :as block}]
                        (let [new-level (+ new-level (- level target-level))
+                             ;; TODO: verify whether it works for unordered list
                              new-content (string/replace-first content
-                                                               (apply str (repeat level pattern))
-                                                               (apply str (repeat new-level pattern)))
+                                                               (config/repeat-block-pattern format level)
+                                                               (config/repeat-block-pattern format new-level))
                              block (cond->
                                     {:block/uuid uuid
                                      :block/level new-level
@@ -385,8 +385,7 @@
       nil
 
       :else
-      (let [pattern (config/get-block-pattern (:block/format to-block))
-            target-block-repo (:block/repo target-block)
+      (let [target-block-repo (:block/repo target-block)
             to-block-repo (:block/repo to-block)
             target-block (assoc target-block
                                 :block/meta

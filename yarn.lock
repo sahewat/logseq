@@ -3911,10 +3911,8 @@ mkdirp@^0.5.4, mkdirp@~0.5.1:
   dependencies:
     minimist "^1.2.5"
 
-mldoc@^0.5.0:
+"mldoc@file:../../../ml/mldoc/js/package":
   version "0.5.0"
-  resolved "https://registry.yarnpkg.com/mldoc/-/mldoc-0.5.0.tgz#f29f5fae518219c13772184fbac5c3ebb93fb339"
-  integrity sha512-DRjC0iIciSn+MHTUFj7M1kSf2A+klqA010AfqMqP58x/TQ/tPsYIGwm+kN9bUfD/buGnarOygTXKFqGQCYe3Xg==
   dependencies:
     yargs "^12.0.2"
 

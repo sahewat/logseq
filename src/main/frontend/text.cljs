@@ -17,6 +17,14 @@
 
 (defonce between-re #"\(between ([^\)]+)\)")
 
+(defn get-level-space-re
+  ([format]
+   (get-level-space-re format true))
+  ([format space?]
+   (re-pattern (util/format "^[\\s\t]?[%s]+\\s%s"
+                            (config/get-block-pattern format)
+                            (if space? "+" "?")))))
+
 (defn page-ref-un-brackets!
   [s]
   (when (string? s)
@@ -60,9 +68,7 @@
 (defn extract-level-spaces
   [text format]
   (if-not (string/blank? text)
-    (let [pattern (util/format
-                   "^[%s]+\\s?"
-                   (config/get-block-pattern format))]
+    (let [pattern (get-level-space-re format)]
       (re-find (re-pattern pattern) text))
     ""))
 
@@ -71,11 +77,7 @@
    (remove-level-spaces text format false))
   ([text format space?]
    (if-not (string/blank? text)
-     (let [pattern (util/format
-                    (if space?
-                      "^[%s]+\\s+"
-                      "^[%s]+\\s?")
-                    (config/get-block-pattern format))]
+     (let [pattern (get-level-space-re format space?)]
        (string/replace-first text (re-pattern pattern) ""))
      "")))
 
@@ -83,7 +85,7 @@
   [text format]
   (if-not (string/blank? text)
     (let [pattern (util/format
-                   "^[%s]+\\s?\n?"
+                   "^[\\s\t]?[%s]+\\s?\n?"
                    (config/get-block-pattern format))
           matched-text (re-find (re-pattern pattern) text)]
       (if matched-text
@@ -199,13 +201,15 @@
 
 (defn re-construct-block-properties
   [format content properties block-with-title?]
-  (let [format (keyword format)
+  (let [pre-spaces (re-find #"^\s+" content)
+        format (keyword format)
         level-spaces (extract-level-spaces content format)
         result (-> content
                    (remove-level-spaces format)
                    (remove-properties!)
                    (rejoin-properties properties {:block-with-title? block-with-title?}))]
-    (str (when level-spaces (string/trim-newline level-spaces))
+    (str pre-spaces
+         (when level-spaces (string/trim-newline level-spaces))
          (when (not block-with-title?) "\n")
          (string/triml result))))
 
@@ -249,3 +253,11 @@
   (let [items (map (fn [item] (str "\"" item "\"")) col)]
     (util/format "[%s]"
                  (string/join ", " items))))
+
+(defn set-new-level!
+  [content format new-level]
+  (when (string? content)
+    (str
+     (config/repeat-block-pattern format (dec new-level))
+     " "
+     (remove-level-spaces content format))))

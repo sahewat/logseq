@@ -25,10 +25,9 @@
   [format hiccup]
   (let [transform-fn (fn [hiccup]
                        (hiccup->doc-inner format hiccup))
-        block-pattern (config/get-block-pattern format)
         map-join (fn [children] (apply str (map transform-fn children)))
         block-transform (fn [level children]
-                          (str (apply str (repeat level block-pattern))
+                          (str (config/repeat-block-pattern format level)
                                " "
                                (->> (map transform-fn children)
                                     (string/join " "))

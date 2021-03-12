@@ -70,6 +70,7 @@
         "ignore": "^5.1.8",
         "jszip": "^3.5.0",
         "mldoc": "^0.5.0",
+        "mldoc": "file:/home/tienson/codes/ml/mldoc/js/package",
         "mousetrap": "^1.6.5",
         "path": "^0.12.7",
         "react": "^17.0.1",

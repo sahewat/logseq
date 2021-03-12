@@ -183,7 +183,7 @@
                              :block/title ""
                              :block/content (config/default-empty-block format)
                              :block/format format
-                             :block/level 2
+                             :block/level 1
                              :block/priority nil
                              :block/anchor (str uuid)
                              :block/meta {:start-pos end-pos

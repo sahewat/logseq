@@ -159,7 +159,7 @@
            (= "\n" (last prefix)))
      ""
      "\n")
-   (string/trim value)
+   (string/trimr value)
    (if (= "\n" (first postfix))
      ""
      "\n")))
@@ -280,9 +280,13 @@
 
                           (let [[new-content offset] (cond
                                                        (and (not @next-leq-level?) (true? indent-left?))
-                                                       [(subs content 1) -1]
+                                                       (let [content' (text/set-new-level! content format (dec block-level))]
+                                                         [content' (- (count content') (count content))])
+
                                                        (and (not @next-leq-level?) (false? indent-left?))
-                                                       [(str (config/get-block-pattern format) content) 1]
+                                                       (let [content' (text/set-new-level! content format (inc block-level))]
+                                                         [content' (- (count content') (count content))])
+
                                                        :else
                                                        [nil 0])
                                 new-end-pos (if old-end-pos
@@ -481,10 +485,13 @@
         file-path (:file/path file)
         format (format/get-format file-path)
         file-content (db/get-file repo file-path)
+        _ (prn {:value0 value})
         value (get-block-new-value block file-content value)
+        _ (prn {:value1 value})
         value (if rebuild-content?
                 (rebuild-block-content value format)
                 value)
+        _ (prn {:value2 value})
         block (assoc block :block/content value)
         {:keys [blocks pages start-pos end-pos]} (if pre-block?
                                                    (let [new-end-pos (utf8/length (utf8/encode value))]
@@ -609,7 +616,7 @@
 
        :else
        (let [value (re-build-block-value block format value properties)
-             content-changed? (not= (string/trim content) (string/trim value))]
+             content-changed? (not= (string/trimr content) (string/trimr value))]
          (when content-changed?
            (let [file (db/entity repo (:db/id file))]
              (cond
@@ -638,7 +645,7 @@
                                :else
                                level)
         snd-block-text (if (and snd-block-text
-                                (re-find (re-pattern (util/format "^[%s]+\\s+" (config/get-block-pattern format))) snd-block-text))
+                                (re-find (text/get-level-space-re format) snd-block-text))
                          snd-block-text
                          (rebuild-block-content
                           (str (config/default-empty-block format snd-block-text-level) " " snd-block-text)
@@ -1846,10 +1853,10 @@
                               :right [true false]
                               [(<= level previous-level)
                                (and (> level previous-level)
-                                    (> level 2))])
+                                    (>= level 2))])
              final-level (cond
                            add? (inc level)
-                           remove? (if (> level 2)
+                           remove? (if (>= level 2)
                                      (dec level)
                                      level)
                            :else level)
@@ -1983,21 +1990,17 @@
                 format (:block/format block)
                 start-pos (get-in block [:block/meta :start-pos])
                 old-end-pos (get-in (last blocks) [:block/meta :end-pos])
-                pattern (config/get-block-pattern format)
                 last-start-pos (atom start-pos)
                 blocks (doall
                         (map (fn [block]
                                (let [content (:block/content block)
                                      level (:block/level block)
-                                     content' (if (= :left direction)
-                                                (subs content 1)
-                                                (str pattern content))
+                                     level' (if (= :left direction) (dec level) (inc level))
+                                     content' (text/set-new-level! content format level')
                                      end-pos (+ @last-start-pos (utf8/length (utf8/encode content')))
                                      block (assoc block
                                                   :block/content content'
-                                                  :block/level (if (= direction :left)
-                                                                 (dec level)
-                                                                 (inc level))
+                                                  :block/level level'
                                                   :block/meta (merge
                                                                (:block/meta block)
                                                                {:start-pos @last-start-pos
@@ -2046,7 +2049,6 @@
               format (:block/format block)
               start-pos (get-in block [:block/meta :start-pos])
               old-end-pos (get-in (last blocks) [:block/meta :end-pos])
-              pattern (config/get-block-pattern format)
               last-start-pos (atom start-pos)
               blocks (doall
                       (map (fn [block]
@@ -2265,7 +2267,6 @@
             block-uuid (:block/uuid block)
             including-parent? (not= (get properties "including-parent") "false")
             template-parent-level (:block/level block)
-            pattern (config/get-block-pattern format)
             content
             (block-handler/get-block-full-content
              (state/get-current-repo)
@@ -2280,8 +2281,8 @@
                                          (if (not including-parent?) 1 0)))
                          properties' (dissoc (into {} properties) "id" "custom_id" "template" "including-parent")]
                      (-> content
-                         (string/replace-first (apply str (repeat level pattern))
-                                               (apply str (repeat new-level pattern)))
+                         (string/replace-first (config/repeat-block-pattern format level)
+                                               (config/repeat-block-pattern format new-level))
                          text/remove-properties!
                          (text/rejoin-properties properties')))))))
             content (if (string/includes? (string/trim edit-content) "\n")
