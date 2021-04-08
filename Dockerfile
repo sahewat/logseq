@@ -19,5 +19,5 @@ EXPOSE 9630
 EXPOSE 8701
 COPY . .
 RUN yarn && yarn run release
-CMD cd static && npx run http-server -p $PORT
+CMD cd static && npx http-server -p $PORT
 
