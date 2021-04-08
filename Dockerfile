@@ -17,5 +17,4 @@ WORKDIR /home/logseq
 EXPOSE 3001
 EXPOSE 9630
 EXPOSE 8701
-RUN yarn 
-RUN yarn watch
+RUN cd logseq && yarn && yarn watch
