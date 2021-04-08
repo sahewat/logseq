@@ -18,4 +18,4 @@ EXPOSE 3001
 EXPOSE 9630
 EXPOSE 8701
 COPY . .
-CMD yarn && yarn watchh
+CMD yarn && yarn watch
