@@ -18,4 +18,5 @@ EXPOSE 3001
 EXPOSE 9630
 EXPOSE 8701
 COPY . .
-CMD yarn && yarn watch
+RUN yarn && yarn run release
+CMD cd static && npx run http-server
