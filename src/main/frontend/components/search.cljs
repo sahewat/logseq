@@ -1,6 +1,7 @@
 (ns frontend.components.search
   (:require [rum.core :as rum]
             [frontend.util :as util]
+            [frontend.components.block :as block]
             [frontend.handler.route :as route]
             [frontend.handler.page :as page-handler]
             [frontend.handler.file :as file-handler]
@@ -16,15 +17,6 @@
             [medley.core :as medley]
             [frontend.context.i18n :as i18n]))
 
-(rum/defc dropdown-content-wrapper [state content]
-  [:div.origin-top-left.absolute.left-0.mt-0.rounded-md.shadow-lg
-   {:class (case state
-             "entering" "transition ease-out duration-100 transform opacity-0 scale-95"
-             "entered" "transition ease-out duration-100 transform opacity-100 scale-100"
-             "exiting" "transition ease-in duration-75 transform opacity-100 scale-100"
-             "exited" "transition ease-in duration-75 transform opacity-0 scale-95")}
-   content])
-
 (defn- partition-between
   "Split `coll` at positions where `pred?` is true."
   [pred? coll]
@@ -33,38 +25,53 @@
 
 (defn highlight-exact-query
   [content q]
-  (let [q-words (string/split q #" ")
-        lc-content (string/lower-case content)
-        lc-q (string/lower-case q)]
-    (if (or (string/includes? lc-content lc-q)
-            (not (re-find #" " q)))
-      (let [i (string/index-of lc-content lc-q)
-            [before after] [(subs content 0 i) (subs content (+ i (count q)))]]
-        [:p
-         (when-not (string/blank? before)
-           [:span before])
-         [:mark (subs content i (+ i (count q)))]
-         (when-not (string/blank? after)
-           [:span after])])
-      (let [elements (loop [words q-words
-                            content content
-                            result []]
-                       (if (and (seq words) content)
-                         (let [word (first words)
-                               lc-word (string/lower-case word)
-                               lc-content (string/lower-case content)]
-                           (if-let [i (string/index-of lc-content lc-word)]
-                             (recur (rest words)
-                                    (subs content (+ i (count word)))
-                                    (vec
-                                     (concat result
-                                             [[:span (subs content 0 i)]
-                                              [:mark (subs content i (+ i (count word)))]])))
-                             (recur nil
-                                    content
-                                    result)))
-                         (conj result [:span content])))]
-        [:p elements]))))
+  (if (or (string/blank? content) (string/blank? q))
+    content
+    (let [q-words (string/split q #" ")
+          lc-content (string/lower-case content)
+          lc-q (string/lower-case q)]
+      (if (or (string/includes? lc-content lc-q)
+              (not (re-find #" " q)))
+        (let [i (string/index-of lc-content lc-q)
+              [before after] [(subs content 0 i) (subs content (+ i (count q)))]]
+          [:p
+           {:class "m-0"}
+           (when-not (string/blank? before)
+             [:span before])
+           [:mark {:class "p-0 rounded-none"} (subs content i (+ i (count q)))]
+           (when-not (string/blank? after)
+             [:span after])])
+        (let [elements (loop [words q-words
+                              content content
+                              result []]
+                         (if (and (seq words) content)
+                           (let [word (first words)
+                                 lc-word (string/lower-case word)
+                                 lc-content (string/lower-case content)]
+                             (if-let [i (string/index-of lc-content lc-word)]
+                               (recur (rest words)
+                                      (subs content (+ i (count word)))
+                                      (vec
+                                       (concat result
+                                               [[:span (subs content 0 i)]
+                                                [:mark (subs content i (+ i (count word)))]])))
+                               (recur nil
+                                      content
+                                      result)))
+                           (conj result [:span content])))]
+          [:p {:class "m-0"} elements])))))
+
+(rum/defc search-result-item
+  [type content]
+  [:.text-sm.font-medium.flex.items-baseline
+   [:.text-xs.rounded.border.mr-2.px-1 {:title type}
+    (get type 0)]
+   content])
+
+(rum/defc block-search-result-item
+  [repo uuid format content q]
+  [:div [[:div {:class "mb-1"} (block/block-parents {:id "block-search-block-parent" :block? true} repo (clojure.core/uuid uuid) format)]
+         [:div {:class "font-medium"} (highlight-exact-query content q)]]])
 
 (rum/defc highlight-fuzzy
   [content indexes]
@@ -149,7 +156,7 @@
        {:style (merge
                 {:top 48
                  :left 32
-                 :width 500})}
+                 :width 700})}
        (ui/auto-complete
         result
         {:class "search-results"
@@ -199,36 +206,31 @@
 
                               nil))
          :item-render (fn [{:keys [type data]}]
-                        (case type
-                          :new-page
-                          [:div.text.font-bold (str (t :new-page) ": ")
-                           [:span.ml-1 (str "\"" search-q "\"")]]
 
-                          :new-file
-                          [:div.text.font-bold (str (t :new-file) ": ")
-                           [:span.ml-1 (str "\"" search-q "\"")]]
+                        [:div {:class "py-2"} (case type
+                                                :new-page
+                                                [:div.text.font-bold (str (t :new-page) ": ")
+                                                 [:span.ml-1 (str "\"" search-q "\"")]]
 
-                          :page
-                          [:div.text-sm.font-medium
-                           [:span.text-xs.rounded.border.mr-2.px-1 {:title "Page"}
-                            "P"]
-                           data]
+                                                :new-file
+                                                [:div.text.font-bold (str (t :new-file) ": ")
+                                                 [:span.ml-1 (str "\"" search-q "\"")]]
 
-                          :file
-                          [:div.text-sm.font-medium
-                           [:span.text-xs.rounded.border.mr-2.px-1 {:title "File"}
-                            "F"]
-                           data]
+                                                :page
+                                                (search-result-item "Page" (highlight-exact-query data search-q))
 
-                          :block
-                          (let [{:block/keys [page content indexes]} data
-                                page (or (:page/original-name page)
-                                         (:page/name page))]
-                            [:div.flex-1
-                             [:div.text-sm.font-medium (str "-> " page)]
-                             (highlight-exact-query content search-q)])
+                                                :file
+                                                (search-result-item "File" (highlight-exact-query data search-q))
 
-                          nil))})])))
+                                                :block
+                                                (let [{:block/keys [page content uuid]} data
+                                                      page (or (:page/original-name page)
+                                                               (:page/name page))
+                                                      repo (state/sub :git/current-repo)
+                                                      format (db/get-page-format page)]
+                                                  (search-result-item "Block" (block-search-result-item repo uuid format content search-q)))
+
+                                                nil)])})])))
 
 (rum/defcs search < rum/reactive
   (rum/local false ::inside-box?)
@@ -244,7 +246,15 @@
         search-q (state/sub :search/q)
         show-result? (boolean (seq search-result))
         blocks-count (or (db/blocks-count) 0)
-        timeout (if (> blocks-count 2000) 500 300)]
+        timeout (cond
+                  (util/electron?)
+                  180
+
+                  (> blocks-count 2000)
+                  500
+
+                  :else
+                  300)]
     (rum/with-context [[t] i18n/*tongue-context*]
       [:div#search.flex-1.flex
        [:div.inner
@@ -273,7 +283,7 @@
                               (state/set-q! value)
                               (reset! search-timeout
                                       (js/setTimeout
-                                       #(search-handler/search value)
+                                       #(search-handler/search (state/get-current-repo) value)
                                        timeout))))))}]
          (when-not (string/blank? search-q)
            (ui/css-transition
