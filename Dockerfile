@@ -20,4 +20,3 @@ EXPOSE 8701
 COPY . .
 RUN yarn && yarn run release
 CMD cd public && npx http-server -p $PORT
-
