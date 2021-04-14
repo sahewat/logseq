@@ -77,7 +77,6 @@
     :editor/editing? nil
     :editor/last-edit-block-id nil
     :editor/in-composition? false
-    :editor/pos 0
     :editor/content {}
     :editor/block nil
     :editor/block-dom-id nil
@@ -112,7 +111,10 @@
 
     ;; all notification contents as k-v pairs
     :notification/contents {}
-    :graph/syncing? false}))
+    :graph/syncing? false
+
+    ;; copied blocks
+    :copy/blocks {:copy/content nil :copy/block-tree nil}}))
 
 (defn get-route-match
   []
@@ -667,40 +669,56 @@
   (when db-id
     (update-state! [:ui/sidebar-collapsed-blocks db-id] not)))
 
+(defn get-edit-block
+  []
+  (get @state :editor/block))
+
+(defn get-last-edit-block
+  []
+  (let [edit-input-id (get-edit-input-id)
+        edit-block (get-edit-block)
+        block-element (when edit-input-id (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block")))
+        container (when block-element
+                    (util/get-block-container block-element))]
+    (when container
+      {:last-edit-block edit-block
+       :container (gobj/get container "id")
+       :pos (util/get-input-pos (gdom/getElement edit-input-id))})))
+
 (defn set-editing!
-  [edit-input-id content block cursor-range]
-  (when edit-input-id
-    (let [block-element (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block"))
-          {:keys [idx container]} (util/get-block-idx-inside-container block-element)
-          block (if (and idx container)
-                  (assoc block
-                         :block/idx idx
-                         :block/container (gobj/get container "id"))
-                  block)
-          content (or content "")]
+  ([edit-input-id content block cursor-range]
+   (set-editing! edit-input-id content block cursor-range true))
+  ([edit-input-id content block cursor-range move-cursor?]
+   (when edit-input-id
+     (let [block-element (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block"))
+           container (util/get-block-container block-element)
+           block (if container
+                   (assoc block
+                          :block/container (gobj/get container "id"))
+                   block)
+           content (or content "")]
 
-      (swap! state
-             (fn [state]
-               (-> state
-                   (assoc-in [:editor/content edit-input-id] (string/trim content))
-                   (assoc
-                    :editor/block block
-                    :editor/editing? {edit-input-id true}
-                    :editor/last-edit-block-id edit-input-id
-                    :cursor-range cursor-range))))
+       (swap! state
+              (fn [state]
+                (-> state
+                    (assoc-in [:editor/content edit-input-id] (string/trim content))
+                    (assoc
+                     :editor/block block
+                     :editor/editing? {edit-input-id true}
+                     :editor/last-edit-block-id edit-input-id
+                     :cursor-range cursor-range))))
 
-      (let [input (gdom/getElement edit-input-id)]
-        (set! (.-value input) (string/trim content))))))
+       (let [input (gdom/getElement edit-input-id)
+             pos (count cursor-range)]
+         (set! (.-value input) (string/trim content))
+         (when move-cursor?
+           (util/move-cursor-to input pos)))))))
 
 (defn clear-edit!
   []
   (swap! state merge {:editor/editing? nil
                       :editor/block nil
                       :cursor-range nil}))
-
-(defn get-edit-block
-  []
-  (get @state :editor/block))
 
 (defn set-last-pos!
   [new-pos]
@@ -1061,7 +1079,7 @@
     (or
      (when-let [last-time (get-in @state [:editor/last-input-time repo])]
        (let [now (util/time-ms)]
-         (>= (- now last-time) 1000)))
+         (>= (- now last-time) 500)))
       ;; not in editing mode
      (not (get-edit-input-id)))))
 
@@ -1136,3 +1154,11 @@
    6))
 
 (defonce diffs (atom nil))
+
+(defn get-copied-blocks
+  []
+  (:copy/blocks @state))
+
+(defn set-copied-blocks
+  [content ids]
+  (set-state! :copy/blocks {:copy/content content :copy/block-tree ids}))

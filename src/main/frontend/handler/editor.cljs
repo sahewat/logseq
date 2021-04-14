@@ -22,6 +22,7 @@
             [goog.dom.classes :as gdom-classes]
             [clojure.string :as string]
             [clojure.set :as set]
+            [clojure.zip :as zip]
             [frontend.util :as util :refer-macros [profile]]
             [frontend.config :as config]
             [dommy.core :as dom]
@@ -253,9 +254,13 @@
 (defn- wrap-parse-block
   [{:block/keys [content format] :as block}]
   (let [ast (mldoc/->edn (string/trim content) (mldoc/default-config format))
-        heading? (= "Paragraph" (first (ffirst ast)))
-        content' (str (config/get-block-pattern format) (if heading? " " "\n")
-                      (string/triml content))]
+        first-elem-type (first (ffirst ast))
+        properties? (= "Properties" first-elem-type)
+        heading? (= "Paragraph" first-elem-type)
+        content (string/triml content)
+        content' (if properties?
+                   content
+                   (str (config/get-block-pattern format) (if heading? " " "\n") content))]
     (-> (block/parse-block (assoc block :block/content content'))
        (dissoc :block/top?
                :block/block-refs-count)
@@ -368,7 +373,7 @@
 ;;                      after-blocks)
 ;;                 opts {:key :block/insert
 ;;                       :data (map (fn [block] (assoc block :block/page page)) blocks)}]
-;;             (do (repo-handler/update-last-edit-block)
+;;             (do (state/update-last-edit-block)
 ;;                 #_(build-outliner-relation (first blocks) (first after-blocks))
 ;;                 (db/refresh repo opts)
 ;;                 (let [files (remove nil? files)]
@@ -842,6 +847,62 @@
                     (array-seq (dom/by-class block "ls-block"))))
             blocks)))
 
+(defn- compose-copied-blocks-contents-&-block-tree
+  [repo block-ids]
+  (let [blocks (db-utils/pull-many repo '[*] (mapv (fn [id] [:block/uuid id]) block-ids))
+        unordered? (:block/unordered (first blocks))
+        format (:block/format (first blocks))
+        level-blocks (mapv #(assoc % :level 0) blocks)
+        level-blocks-map (into {} (mapv (fn [b] [(:db/id b) b]) level-blocks))
+        [level-blocks-map _]
+        (reduce (fn [[r state] [id block]]
+                  (if-let [parent-level (get-in state [(:db/id (:block/parent block)) :level])]
+                    [(conj r [id (assoc block :level (inc parent-level))])
+                     (assoc-in state [(:db/id block) :level] (inc parent-level))]
+                    [(conj r [id block])
+                     state])) [{} level-blocks-map] level-blocks-map)
+        loc (reduce (fn [loc [_ {:keys [level] :as block}]]
+                      (let [loc*
+                            (loop [loc (zip/vector-zip (zip/root loc))
+                                   level level]
+                              (if (> level 0)
+                                (if-let [down (zip/rightmost (zip/down loc))]
+                                  (recur down (dec level))
+                                  loc)
+                                loc))
+                            loc**
+                            (if (vector? (zip/node loc*))
+                              (zip/append-child loc* block)
+                              (-> loc*
+                                  zip/up
+                                  (zip/append-child [block])))]
+                        loc**)) (zip/vector-zip []) level-blocks-map)
+        tree (zip/root loc)
+        contents
+        (mapv (fn [[id block]]
+                (let [header
+                      (if (and unordered? (= format :markdown))
+                        (str (string/join (repeat (:level block) "  ")) "-")
+                        (let [header-char (if (= format :markdown) "#" "*")
+                              init-char (if (= format :markdown) "##" "*")]
+                          (str (string/join (repeat (:level block) header-char)) init-char)))]
+                  (str header " " (:block/content block) "\n")))
+              level-blocks-map)
+        content-without-properties
+        (mapv
+         (fn [content]
+           (let [ast (mldoc/->edn content (mldoc/default-config format))
+                 properties-loc
+                 (->> ast
+                      (filterv (fn [[[type _] loc]] (= type "Property_Drawer")))
+                      (mapv second)
+                      first)]
+             (if properties-loc
+               (utf8/delete! content (:start_pos properties-loc) (:end_pos properties-loc))
+               content)))
+         contents)]
+    [(string/join content-without-properties) tree]))
+
 (defn copy-selection-blocks
   []
   (when-let [blocks (seq (get-selected-blocks-with-children))]
@@ -849,11 +910,9 @@
           ids (->> (distinct (map #(when-let [id (dom/attr % "blockid")]
                                      (uuid id)) blocks))
                    (remove nil?))
-          content (some->> (db/get-blocks-contents repo ids)
-                           (map :block/content))
-          content (string/join "" content)]
-      (when-not (string/blank? content)
-        (common-handler/copy-to-clipboard-without-id-property! content)))))
+          [content tree] (compose-copied-blocks-contents-&-block-tree repo ids)]
+      (common-handler/copy-to-clipboard-without-id-property! content)
+      (state/set-copied-blocks content tree))))
 
 (defn cut-selection-blocks
   [copy?]
@@ -1030,42 +1089,37 @@
              dummy?)
      (save-block-aux! block value format {}))))
 
-(defn save-current-block-when-idle!
-  ([]
-   (save-current-block-when-idle! {}))
-  ([{:keys [check-idle? chan chan-callback]
-     :or {check-idle? true}}]
-   (when (and (nil? (state/get-editor-op))
-              ;; non English input method
-              (not (state/editor-in-composition?)))
-     (when-let [repo (state/get-current-repo)]
-       (when (and (if check-idle? (state/input-idle? repo) true)
-                  (not (state/get-editor-show-page-search?))
-                  (not (state/get-editor-show-page-search-hashtag?))
-                  (not (state/get-editor-show-block-search?))
-                  (not (state/get-editor-show-date-picker?))
-                  (not (state/get-editor-show-template-search?))
-                  (not (state/get-editor-show-input)))
-         (state/set-editor-op! :auto-save)
-         (try
-           (let [input-id (state/get-edit-input-id)
-                 block (state/get-edit-block)
-                 db-block (when-let [block-id (:block/uuid block)]
-                            (db/pull [:block/uuid block-id]))
-                 elem (and input-id (gdom/getElement input-id))
-                 db-content (:block/content db-block)
-                 db-content-without-heading (and db-content
-                                                 (util/safe-subs db-content (:block/level db-block)))
-                 value (and elem (gobj/get elem "value"))]
-             (when (and block value db-content-without-heading
-                        (or
-                         (not= (string/trim db-content-without-heading)
-                               (string/trim value))))
-               (save-block-aux! db-block value (:block/format db-block) {:chan chan
-                                                                         :chan-callback chan-callback})))
-           (catch js/Error error
-             (log/error :save-block-failed error)))
-         (state/set-editor-op! nil))))))
+(defn save-current-block!
+  []
+  (when (and (nil? (state/get-editor-op))
+             ;; non English input method
+             (not (state/editor-in-composition?)))
+    (when-let [repo (state/get-current-repo)]
+      (when (and (not (state/get-editor-show-page-search?))
+                 (not (state/get-editor-show-page-search-hashtag?))
+                 (not (state/get-editor-show-block-search?))
+                 (not (state/get-editor-show-date-picker?))
+                 (not (state/get-editor-show-template-search?))
+                 (not (state/get-editor-show-input)))
+        (state/set-editor-op! :auto-save)
+        (try
+          (let [input-id (state/get-edit-input-id)
+                block (state/get-edit-block)
+                db-block (when-let [block-id (:block/uuid block)]
+                           (db/pull [:block/uuid block-id]))
+                elem (and input-id (gdom/getElement input-id))
+                db-content (:block/content db-block)
+                db-content-without-heading (and db-content
+                                                (util/safe-subs db-content (:block/level db-block)))
+                value (and elem (gobj/get elem "value"))]
+            (when (and block value db-content-without-heading
+                       (or
+                        (not= (string/trim db-content-without-heading)
+                              (string/trim value))))
+              (save-block-aux! db-block value (:block/format db-block) {})))
+          (catch js/Error error
+            (log/error :save-block-failed error)))
+        (state/set-editor-op! nil)))))
 
 (defn on-up-down
   [direction]
@@ -1635,14 +1689,10 @@
           (state/set-editor-show-page-search! false)
           (state/set-editor-show-page-search-hashtag! false))))))
 
-(defn periodically-save!
-  []
-  (js/setInterval save-current-block-when-idle! 500))
-
 (defn save!
   []
   (when-let [repo (state/get-current-repo)]
-    (save-current-block-when-idle! {:check-idle? false})
+    (save-current-block!)
 
     (when (string/starts-with? repo "https://") ; git repo
       (repo-handler/auto-push!))))
@@ -1657,12 +1707,16 @@
         new-value (string/replace value full_text new-full-text)]
     (save-block-aux! block new-value (:block/format block) {})))
 
+(defonce *auto-save-timeout (atom nil))
 (defn edit-box-on-change!
   [e block id]
   (let [value (util/evalue e)
-        current-pos (:pos (util/get-caret-pos (gdom/getElement id)))]
+        current-pos (util/get-input-pos (gdom/getElement id))]
     (state/set-edit-content! id value false)
-    (state/set-edit-pos! current-pos)
+    (when @*auto-save-timeout
+      (js/clearTimeout @*auto-save-timeout))
+    (reset! *auto-save-timeout
+            (js/setTimeout save-current-block! 300))
     (when-let [repo (or (:block/repo block)
                         (state/get-current-repo))]
       (state/set-editor-last-input-time! repo (util/time-ms))
@@ -2024,10 +2078,8 @@
                 (outdent-on-shift-tab state)
                 (indent-on-tab state))
               (and input pos
-                   (js/setTimeout
-                    #(when-let [input (state/get-input)]
-                       (util/move-cursor-to input pos))
-                    0))))))))
+                   (when-let [input (state/get-input)]
+                     (util/move-cursor-to input pos)))))))))
 
 (defn keydown-not-matched-handler
   [input input-id format]
@@ -2147,9 +2199,7 @@
 (defn editor-on-click!
   [id]
   (fn [_e]
-    (let [input (gdom/getElement id)
-          current-pos (:pos (util/get-caret-pos input))]
-      (state/set-edit-pos! current-pos)
+    (let [input (gdom/getElement id)]
       (close-autocomplete-if-outside input))))
 
 (defn editor-on-change!
@@ -2166,10 +2216,63 @@
                  timeout)))
       (edit-box-on-change! e block id))))
 
+
+(defn- get-current-page-format
+  []
+  (when-let [page (state/get-current-page)]
+    (db/get-page-format page)))
+
+(defn- paste-text
+  [text e]
+  (let [repo (state/get-current-repo)
+        page (or (db/entity [:block/name (state/get-current-page)])
+                 (db/entity [:block/original-name (state/get-current-page)]))
+        file (:block/file page)
+        copied-blocks (state/get-copied-blocks)
+        copied-block-tree (:copy/block-tree copied-blocks)]
+    (when (and (not (string/blank? text))
+               (= (string/trim text) (string/trim (:copy/content copied-blocks))))
+      ;; copy from logseq internally
+      (let [editing-block (state/get-edit-block)
+            parent (:block/parent editing-block)
+            left (:block/left editing-block)
+            sibling? (not= parent left)
+            target-block (outliner-core/block (db/pull (if sibling? (:db/id left) (:db/id parent))))
+            format (or (:block/format target-block) (state/get-preferred-format))
+            new-block-uuids (atom #{})
+            metadata-replaced-copied-blocks
+            (zip/root
+             (loop [loc (zip/vector-zip copied-block-tree)]
+               (if (zip/end? loc)
+                 loc
+                 (if (vector? (zip/node loc))
+                   (recur (zip/next loc))
+                   (let [uuid (random-uuid)]
+                     (swap! new-block-uuids (fn [acc uuid] (conj acc uuid)) uuid)
+                     (recur (zip/next (zip/edit
+                                       loc
+                                       #(outliner-core/block
+                                         (conj {:block/uuid uuid
+                                                :block/page (select-keys page [:db/id])
+                                                :block/file (select-keys file [:db/id])
+                                                :block/format format}
+                                               (dissoc %
+                                                       :block/uuid
+                                                       :block/page
+                                                       :block/file
+                                                       :db/id
+                                                       :block/left
+                                                       :block/parent
+                                                       :block/format)))))))))))
+            _ (outliner-core/insert-nodes metadata-replaced-copied-blocks target-block sibling?)
+            new-blocks (db/pull-many repo '[*] (map (fn [id] [:block/uuid id]) @new-block-uuids))]
+        (db/refresh repo {:key :block/insert :data new-blocks})
+        (util/stop e)))))
+
 (defn editor-on-paste!
   [id]
   (fn [e]
-    (when-let [handled
+    (if-let [handled
                (let [pick-one-allowed-item
                      (fn [items]
                        (if (util/electron?)
@@ -2199,7 +2302,8 @@
                  (if (get picked 1)
                    (match picked
                      [:asset file] (set-asset-pending-file file))))]
-      (util/stop e))))
+      (util/stop e)
+      (paste-text (.getData (gobj/get e "clipboardData") "text") e))))
 
 (defn- cut-blocks-and-clear-selections!
   [copy?]
