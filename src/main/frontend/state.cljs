@@ -191,6 +191,10 @@
   (true? (:feature/enable-grammarly?
           (get (sub-config) (get-current-repo)))))
 
+(defn store-all-ids-in-text?
+  []
+  (true? (:text/store-all-ids (get-config))))
+
 (defn scheduled-deadlines-disabled?
   []
   (true? (:feature/disable-scheduled-and-deadline-query?
@@ -674,6 +678,7 @@
                          :block/container (gobj/get container "id"))
                   block)
           content (or content "")]
+
       (swap! state
              (fn [state]
                (-> state
@@ -682,7 +687,10 @@
                     :editor/block block
                     :editor/editing? {edit-input-id true}
                     :editor/last-edit-block-id edit-input-id
-                    :cursor-range cursor-range)))))))
+                    :cursor-range cursor-range))))
+
+      (let [input (gdom/getElement edit-input-id)]
+        (set! (.-value input) (string/trim content))))))
 
 (defn clear-edit!
   []

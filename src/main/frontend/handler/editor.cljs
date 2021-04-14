@@ -152,7 +152,7 @@
   ([id markup dummy?]
    (when-let [node (gdom/getElement (str id))]
      (when-let [cursor-range (state/get-cursor-range)]
-       (when-let [range (string/trim cursor-range)]
+       (when-let [range cursor-range]
          (let [pos (diff/find-position markup range)]
            (util/set-caret-pos! node pos)))))))
 
@@ -191,6 +191,17 @@
     (dom/remove-class! block "noselect"))
   (state/clear-selection!))
 
+(defn- text-range-by-lst-fst-line [content [direction pos]]
+  (case direction
+        :up
+        (let [last-new-line (or (string/last-index-of content \newline) -1)
+              end (+ last-new-line pos 1)]
+          (subs content 0 end))
+        :down
+        (-> (string/split-lines content)
+            first
+            (subs 0 pos))))
+
 ;; id: block dom id, "ls-block-counter-uuid"
 (defn edit-block!
   ([block pos format id]
@@ -206,6 +217,9 @@
              content (or custom-content (:block/content block) "")
              content-length (count content)
              text-range (cond
+                          (vector? pos)
+                          (text-range-by-lst-fst-line content pos)
+
                           (and (> tail-len 0) (>= (count content) tail-len))
                           (subs content 0 (- (count content) tail-len))
 
@@ -239,13 +253,9 @@
 (defn- wrap-parse-block
   [{:block/keys [content format] :as block}]
   (let [ast (mldoc/->edn (string/trim content) (mldoc/default-config format))
-        properties? (contains? #{"properties" "property_drawer"}
-                               (when-let [type (first (ffirst ast))]
-                                 (string/lower-case type)))
-        content' (if properties?
-                   (string/trim content)
-                   (str (config/get-block-pattern format) " "
-                        (string/triml content)))]
+        heading? (= "Paragraph" (first (ffirst ast)))
+        content' (str (config/get-block-pattern format) (if heading? " " "\n")
+                      (string/triml content))]
     (-> (block/parse-block (assoc block :block/content content'))
        (dissoc :block/top?
                :block/block-refs-count)
@@ -455,10 +465,9 @@
         new-m {:block/uuid (db/new-block-id)
                :block/content snd-block-text}
         next-block (-> (merge block new-m)
-                     (dissoc :db/id :block/collapsed?)
+                       (dissoc :db/id :block/collapsed? :block/properties :block/pre-block? :block/meta)
                      (wrap-parse-block))]
     (do
-      (repo-handler/update-last-edit-block)
       (profile
        "outliner insert block"
        (outliner-insert-block! current-block next-block block-self?))
@@ -482,21 +491,22 @@
 (defn get-state
   [state]
   (let [[{:keys [on-hide block block-id block-parent-id dummy? format sidebar?]} id config] (:rum/args state)
-        node (gdom/getElement id)
-        value (gobj/get node "value")
-        pos (gobj/get node "selectionStart")]
-    {:config config
-     :on-hide on-hide
-     :dummy? dummy?
-     :sidebar? sidebar?
-     :format format
-     :id id
-     :block block
-     :block-id block-id
-     :block-parent-id block-parent-id
-     :node node
-     :value value
-     :pos pos}))
+        node (gdom/getElement id)]
+    (when node
+      (let [value (gobj/get node "value")
+            pos (gobj/get node "selectionStart")]
+        {:config config
+         :on-hide on-hide
+         :dummy? dummy?
+         :sidebar? sidebar?
+         :format format
+         :id id
+         :block block
+         :block-id block-id
+         :block-parent-id block-parent-id
+         :node node
+         :value value
+         :pos pos}))))
 
 (defn- with-timetracking-properties
   [block value]
@@ -519,24 +529,25 @@
            ;; skip this operation if it's inserting
             (not= :insert (state/get-editor-op)))
      (state/set-editor-op! :insert)
-     (let [{:keys [block value format id config]} (get-state state)
-           value (if (string? block-value) block-value value)
-           block-id (:block/uuid block)
-           block (or (db/pull [:block/uuid block-id])
-                     block)
-           repo (or (:block/repo block) (state/get-current-repo))
-           properties (with-timetracking-properties block value)]
-       ;; save the current block and insert a new block
-       (insert-new-block-aux!
-        config
-        (assoc block :block/properties properties)
-        value
-        {:ok-handler
-         (fn [last-block]
-           (let [last-id (:block/uuid last-block)]
-             ;; perf: improvement
-             (edit-block! last-block 0 format id)
-             (clear-when-saved!)))})))))
+     (when-let [state (get-state state)]
+       (let [{:keys [block value format id config]} state
+             value (if (string? block-value) block-value value)
+             block-id (:block/uuid block)
+             block (or (db/pull [:block/uuid block-id])
+                       block)
+             repo (or (:block/repo block) (state/get-current-repo))
+             properties (with-timetracking-properties block value)]
+         ;; save the current block and insert a new block
+         (insert-new-block-aux!
+          config
+          (assoc block :block/properties properties)
+          value
+          {:ok-handler
+           (fn [last-block]
+             (let [last-id (:block/uuid last-block)]
+               ;; perf: improvement
+               (edit-block! last-block 0 format id)
+               (clear-when-saved!)))}))))))
 
 (defn update-timestamps-content!
   [{:block/keys [repeated? marker] :as block} content]
@@ -727,33 +738,44 @@
                     :data blocks}]
           (db/refresh repo opts))))))
 
+(defn- block-property-aux!
+  [block-id key value]
+  (let [block-id (if (string? block-id) (uuid block-id) block-id)
+        key (keyword (string/lower-case (name key)))
+        repo (state/get-current-repo)]
+    (when repo
+      (when-let [block (db/entity [:block/uuid block-id])]
+        (let [format (:block/format block)
+              content (:block/content block)
+              markdown? (= format :markdown)
+              properties (:block/properties block)
+              properties (if value        ; add
+                           (assoc properties key value)
+                           (dissoc properties key))
+              content (if value
+                        (text/insert-property content key value)
+                        (text/remove-property content key))
+              block (outliner-core/block {:block/uuid block-id
+                                          :block/properties properties
+                                          :block/content content})]
+          (outliner-core/save-node block)
+          (let [opts {:key :block/change
+                      :data [block]}]
+            (db/refresh repo opts)))))))
+
 (defn remove-block-property!
   [block-id key]
-  (let [block-id (if (string? block-id) (uuid block-id) block-id)
-        key (string/lower-case (str key))]
-    (when-let [block (db/pull [:block/uuid block-id])]
-      (let [{:block/keys [content properties]} block]
-        (when (get properties key)
-          (save-block-if-changed! block content
-                                  {:remove-properties [key]}))))))
+  (block-property-aux! block-id key nil)
+  (db/refresh (state/get-current-repo)
+              {:key :block/change
+               :data [(db/pull [:block/uuid block-id])]}))
 
 (defn set-block-property!
   [block-id key value]
-  (let [block-id (if (string? block-id) (uuid block-id) block-id)
-        key (string/lower-case (str key))
-        value (str value)]
-    (when-let [block (db/pull [:block/uuid block-id])]
-      (when-not (:block/pre-block? block)
-        (let [{:block/keys [content properties]} block]
-          (cond
-            (and (string? (get properties key))
-                 (= (string/trim (get properties key)) value))
-            nil
-
-            :else
-            (save-block-if-changed! block content
-                                    {:custom-properties {key value}
-                                     :rebuild-content? false})))))))
+  (block-property-aux! block-id key value)
+  (db/refresh (state/get-current-repo)
+              {:key :block/change
+               :data [(db/pull [:block/uuid block-id])]}))
 
 (defn set-block-timestamp!
   [block-id key value]
@@ -1069,11 +1091,7 @@
                               (string/trim value))
                     (save-block! repo uuid value)))
                 (let [block (db/pull repo '[*] [:block/uuid (cljs.core/uuid sibling-block-id)])]
-                  ;; TODO fix me, edit block pos should be the pos of last line or first line
-                  ;; if the target is multiline block, shall open edit
-                  ;; 1. if up, edit last line
-                  ;; 2. if down, edit first line
-                  (edit-block! block (state/get-edit-pos) format (state/get-edit-input-id)))))))
+                  (edit-block! block [direction (util/get-first-or-last-line-pos element)] format (state/get-edit-input-id)))))))
         ;;just up and down
         (if up?
           (util/move-cursor-up element)
@@ -1560,10 +1578,6 @@
       (.focus input)
       (util/move-cursor-to input saved-cursor))))
 
-(defn set-block-as-a-heading!
-  [block-id value]
-  (set-block-property! block-id "heading" value))
-
 (defn open-block!
   [first?]
   (fn [e]
@@ -1783,11 +1797,56 @@
         (keydown-new-line)))))
 
 
+(defn- move-cross-boundrary-up-down
+  [direction]
+  (let [input (state/get-input)
+        line-pos (util/get-first-or-last-line-pos input)
+        repo (state/get-current-repo)
+        f (case direction
+                :up get-prev-block-non-collapsed
+                :down get-next-block-non-collapsed)
+        sibling-block (f (gdom/getElement (state/get-editing-block-dom-id)))
+        {:block/keys [uuid content format]} (state/get-edit-block)]
+    (when sibling-block
+      (when-let [sibling-block-id (d/attr sibling-block "blockid")]
+        (let [value (state/get-edit-content)]
+          (when (not= (-> content
+                          (text/remove-level-spaces format)
+                          text/remove-properties!
+                          string/trim)
+                      (string/trim value))
+            (save-block! repo uuid value)))
+
+        (let [block (db/pull repo '[*] [:block/uuid (cljs.core/uuid sibling-block-id)])]
+          (edit-block! block
+                       [direction line-pos]
+                       format
+                       (state/get-edit-input-id)))))))
+
 (defn keydown-up-down-handler
   [direction]
   (fn [_]
     (when-not (in-auto-complete? nil)
-      (on-up-down direction))))
+      (let [input (state/get-input)
+            line-height (util/get-textarea-line-height input)
+            selected-start (.-selectionStart input)
+            selected-end (.-selectionEnd input)
+            up? (= direction :up)
+            down? (= direction :down)]
+        (cond
+          (not= selected-start selected-end)
+          (if up?
+            (util/set-caret-pos! input selected-start)
+            (util/set-caret-pos! input selected-end))
+
+          (or (and up? (util/textarea-cursor-first-row? input line-height))
+              (and down? (util/textarea-cursor-end-row? input line-height)))
+          (move-cross-boundrary-up-down direction)
+
+          :else
+          (if up?
+            (util/move-cursor-up input)
+            (util/move-cursor-down input)))))))
 
 (defn- move-to-block-when-cross-boundrary
   [_ direction]
@@ -1811,22 +1870,29 @@
           (let [block (db/pull repo '[*] [:block/uuid (cljs.core/uuid sibling-block-id)])]
             (edit-block! block pos format id)))))))
 
-(defn- on-arrow-move-to-boundray
-  [input e direction]
-  (if (or (and (= :left direction) (util/input-start? input))
-          (and (= :right direction) (util/input-end? input)))
-    (move-to-block-when-cross-boundrary e direction)
-    ;; move left or right
-    (if (= direction :left)
-      (util/cursor-move-back input 1)
-      (util/cursor-move-forward input 1))))
-
 (defn keydown-arrow-handler
   [direction]
   (fn [e]
-    (let [input (state/get-input)]
-      (when-not (in-auto-complete? nil)
-        (on-arrow-move-to-boundray input e direction)))))
+    (when-not (in-auto-complete? nil)
+      (let [input (state/get-input)
+            selected-start (.-selectionStart input)
+            selected-end (.-selectionEnd input)
+            left? (= direction :left)
+            right? (= direction :right)]
+        (cond
+          (not= selected-start selected-end)
+          (if left?
+            (util/set-caret-pos! input selected-start)
+            (util/set-caret-pos! input selected-end))
+
+          (or (and left? (util/input-start? input))
+              (and right? (util/input-end? input)))
+          (move-to-block-when-cross-boundrary e direction)
+
+          :else
+          (if left?
+            (util/cursor-move-back input 1)
+            (util/cursor-move-forward input 1)))))))
 
 (defn keydown-backspace-handler
   [get-state-fn]

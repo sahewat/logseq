@@ -51,7 +51,8 @@
             [shadow.loader :as loader]
             [frontend.search :as search]
             [frontend.debug :as debug]
-            [frontend.modules.outliner.tree :as tree]))
+            [frontend.modules.outliner.tree :as tree]
+            [clojure.walk :as walk]))
 
 ;; TODO: remove rum/with-context because it'll make reactive queries not working
 
@@ -1025,8 +1026,7 @@
                         (seq body)))
         collapsed? (rum/react *collapsed?)
         control-show? (util/react *control-show?)
-        dark? (= "dark" (state/sub :ui/theme))
-        heading? (= (get (:block/properties block) "heading") "true")]
+        dark? (= "dark" (state/sub :ui/theme))]
     [:div.mr-2.flex.flex-row.items-center
      {:style {:height 24
               :margin-top 0
@@ -1065,8 +1065,7 @@
                     (when (and (:document/mode? config)
                                (not collapsed?))
                       "hide-inner-bullet"))}
-       [:span.bullet {:blockid (str uuid)
-                      :class (if heading? "bullet-heading" "")}]]]]))
+       [:span.bullet {:blockid (str uuid)}]]]]))
 
 (defn- build-id
   [config]
@@ -1213,8 +1212,7 @@
         priority (priority-cp t)
         tags (block-tags-cp t)
         contents? (= (:id config) "contents")
-        heading? (= (get properties "heading") "true")
-        bg-color (get properties "background_color")]
+        bg-color (:background-color properties)]
     (->elem
      :div
      (merge
@@ -1281,9 +1279,13 @@
 (rum/defc property-cp
   [config block k v]
   [:div.my-1
-   [:b k]
+   [:b (name k)]
    [:span.mr-1 ":"]
-   (if (coll? v)
+   (cond
+     (int? v)
+     v
+
+     (coll? v)
      (let [v (->> (remove string/blank? v)
                   (filter string?))
            vals (for [v-item v]
@@ -1291,6 +1293,8 @@
            elems (interpose (span-comma) vals)]
        (for [elem elems]
          (rum/with-key elem (str (random-uuid)))))
+
+     :else
      (let [page-name (string/lower-case (str v))]
        (if (db/entity [:block/name page-name])
          (page-cp config {:block/name page-name})
@@ -1298,7 +1302,8 @@
 
 (rum/defc properties-cp
   [config block]
-  (let [properties (apply dissoc (:block/properties block) text/hidden-properties)]
+  (let [properties (walk/keywordize-keys (:block/properties block))
+        properties (apply dissoc properties text/hidden-properties)]
     (when (seq properties)
       [:div.blocks-properties.text-sm.opacity-80.my-1.p-2
        (for [[k v] properties]
@@ -1398,6 +1403,7 @@
 (rum/defc block-content < rum/reactive
   [config {:block/keys [uuid title body meta content marker dummy? page format repo children pre-block? properties collapsed? idx container block-refs-count scheduled deadline repeated?] :as block} edit-input-id block-id slide?]
   (let [dragging? (rum/react *dragging?)
+        content (if (string? content) (string/trim content) "")
         mouse-down-key (if (util/ios?)
                          :on-click
                          :on-mouse-down ; TODO: it seems that Safari doesn't work well with on-mouse-down
@@ -1416,7 +1422,7 @@
 
       (cond
         pre-block?
-        (pre-block-cp config (string/trim content) format)
+        (pre-block-cp config content format)
 
         dummy?
         [:span.opacity-50 "Click here to start writing"]

@@ -62,6 +62,29 @@
      (outliner-state/get-by-parent-id repo [:block/uuid id])
      (mapv block))))
 
+;; TODO: we might need to store created-at and updated-at as datom attributes
+;; instead of being attributes of properties.
+;; which might improve the db performance, we can improve it later
+(defn- with-timestamp
+  [m]
+  (let [updated-at (util/time-ms)
+        properties (assoc (:block/properties m)
+                          :id (:block/uuid m)
+                          :updated-at updated-at)
+        properties (if-let [created-at (get properties :created-at)]
+                     properties
+                     (assoc properties :created-at updated-at))
+        m (assoc m :block/properties properties)
+        page-id (or (get-in m [:block/page :db/id])
+                    (:db/id (:block/page (db/entity (:db/id m)))))
+        page (db/entity page-id)
+        page-properties (:block/properties page)
+        page-tx {:db/id page-id
+                 :block/properties (assoc page-properties
+                                          :updated-at updated-at
+                                          :created-at (get page-properties :created-at updated-at))}]
+    [m page-tx]))
+
 ;; -get-id, -get-parent-id, -get-left-id return block-id
 ;; the :block/parent, :block/left should be datascript lookup ref
 
@@ -111,7 +134,12 @@
                 (dissoc :block/children :block/dummy? :block/level :block/meta)
                 (util/remove-nils))]
       (swap! txs-state conj m)
-      m))
+      ;; TODO: enable for the database-only version
+      ;; (let [[m page-tx] (with-timestamp (:data this))]
+      ;;  (swap! txs-state conj m page-tx)
+      ;;  m)
+      )
+    )
 
   (-del [this txs-state]
     (assert (ds/outliner-txs-state? txs-state)
@@ -143,7 +171,8 @@
 (defn save-node
   [node]
   {:pre [(tree/satisfied-inode? node)]}
-  (ds/auto-transact! [db (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [db (ds/new-outliner-txs-state)] {:outliner-op :save-node}
     (tree/-save node db)))
 
 (defn insert-node-as-first-child
@@ -179,7 +208,8 @@
 
 (defn insert-node
   [new-node target-node sibling?]
-  (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [txs-state (ds/new-outliner-txs-state)] {:outliner-op :insert-node}
     (if sibling?
       (insert-node-as-sibling txs-state new-node target-node)
       (insert-node-as-first-child txs-state new-node target-node))))
@@ -187,7 +217,8 @@
 (defn move-node
   [node up?]
   {:pre [(tree/satisfied-inode? node)]}
-  (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [txs-state (ds/new-outliner-txs-state)] {:outliner-op :move-node}
     (let [[up-node down-node] (if up?
                                 (let [left (tree/-get-left node)
                                       parent? (= left (tree/-get-parent node))]
@@ -209,7 +240,8 @@
   "Delete node from the tree."
   [node]
   {:pre [(tree/satisfied-inode? node)]}
-  (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [txs-state (ds/new-outliner-txs-state)] {:outliner-op :delete-node}
     (let [right-node (tree/-get-right node)]
       (tree/-del node txs-state)
       (when (tree/satisfied-inode? right-node)
@@ -247,7 +279,8 @@
   [start-node end-node block-ids]
   {:pre [(tree/satisfied-inode? start-node)
          (tree/satisfied-inode? end-node)]}
-  (do (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (do (ds/auto-transact!
+        [txs-state (ds/new-outliner-txs-state)] {:outliner-op :delete-nodes}
         (if (= start-node end-node)
           (delete-node start-node)
           (let [right-node (tree/-get-right end-node)
@@ -278,7 +311,8 @@
 
 (defn indent-outdent-nodes
   [nodes indent?]
-  (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [txs-state (ds/new-outliner-txs-state)] {:outliner-op :indent-outdent-nodes}
    (let [first-node (first nodes)
          last-node (last nodes)]
      (if indent?
@@ -323,7 +357,8 @@
   [root target-node sibling?]
   {:pre [(every? tree/satisfied-inode? [root target-node])
          (boolean? sibling?)]}
-  (ds/auto-transact! [txs-state (ds/new-outliner-txs-state)]
+  (ds/auto-transact!
+    [txs-state (ds/new-outliner-txs-state)] {:outliner-op :move-subtree}
     (let [left-node-id (tree/-get-left-id root)
          right-node (tree/-get-right root)]
       (when (tree/satisfied-inode? right-node)
